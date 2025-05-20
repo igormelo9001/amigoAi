@@ -2,114 +2,89 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
-import { Audio } from 'expo-av';
+import { Audio, MediaRecorder } from 'expo-audio';
+import AudioVisualizer from './AudioVisualizer';
 
 const Assistant = () => {
   const [isListening, setIsListening] = useState(false);
   const [spokenText, setSpokenText] = useState('');
-  const [assistantResponse, setAssistantResponse] = useState('');
-  const [recording, setRecording] = useState(null);
-  const [animationValue] = useState(new Animated.Value(1));
+  const [recorder, setRecorder] = useState(null);
+  const [audioUri, setAudioUri] = useState(null);
+  const [amplitude, setAmplitude] = useState(0);
 
-  useEffect(() => {
-    // Cleanup recording on unmount
-    return () => {
-      if (recording) {
-        recording.stopAndUnloadAsync();
-      }
-    };
-  }, []);
-
-  // Animate button when listening
-  useEffect(() => {
-    if (isListening) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(animationValue, {
-            toValue: 1.2,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(animationValue, {
-            toValue: 1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    } else {
-      animationValue.setValue(1);
-    }
-  }, [isListening]);
-
-  const startListening = async () => {
+  const startRecording = async () => {
     try {
-      await Audio.requestPermissionsAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        console.error('Permission denied');
+        return;
+      }
+
+      const mediaRecorder = new MediaRecorder();
+      
+      mediaRecorder.addEventListener('dataavailable', (event) => {
+        if (event.data.size > 0) {
+          setAudioUri(URL.createObjectURL(event.data));
+        }
       });
 
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
+      mediaRecorder.addEventListener('start', () => {
+        setIsListening(true);
+      });
+
+      mediaRecorder.addEventListener('stop', () => {
+        setIsListening(false);
+      });
+
+      // Set up audio analyzer for visualization
+      const audioContext = new Audio.AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const microphone = await audioContext.createMediaStreamSource(stream);
+      microphone.connect(analyser);
       
-      setRecording(recording);
-      setIsListening(true);
+      analyser.fftSize = 256;
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const updateAmplitude = () => {
+        if (isListening) {
+          analyser.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+          setAmplitude(average / 128.0); // Normalize to 0-1 range
+          requestAnimationFrame(updateAmplitude);
+        }
+      };
+
+      updateAmplitude();
       
-      // Simulate voice recognition (replace with actual implementation later)
-      setTimeout(() => stopListening(), 3000);
+      await mediaRecorder.start();
+      setRecorder(mediaRecorder);
+      
     } catch (error) {
       console.error('Failed to start recording:', error);
-      setIsListening(false);
     }
   };
 
-  const stopListening = async () => {
+  const stopRecording = async () => {
     try {
-      if (!recording) return;
-
-      setIsListening(false);
-      await recording.stopAndUnloadAsync();
-      setRecording(null);
-
-      // Simulate processing (replace with actual STT later)
-      handleUserInput('Olá, como posso ajudar?');
+      if (recorder) {
+        await recorder.stop();
+        setRecorder(null);
+      }
     } catch (error) {
       console.error('Failed to stop recording:', error);
     }
   };
 
-  const handleUserInput = async (text) => {
-    setSpokenText(text);
-    
-    // Simple response logic (expand this later)
-    const response = getAssistantResponse(text);
-    setAssistantResponse(response);
-    
-    await speak(response);
-  };
-
-  const getAssistantResponse = (text) => {
-    const lowerText = text.toLowerCase();
-    if (lowerText.includes('olá') || lowerText.includes('oi')) {
-      return 'Olá! Sou seu assistente virtual. Como posso ajudar?';
-    }
-    return 'Desculpe, ainda estou aprendendo a responder isso.';
-  };
-
-  const speak = async (text) => {
+  const playRecording = async () => {
     try {
-      await Speech.speak(text, {
-        language: 'pt-BR',
-        pitch: 1.0,
-        rate: 0.9,
-        onStart: () => console.log('Started speaking'),
-        onDone: () => console.log('Done speaking'),
-        onError: (error) => console.error('Speech error:', error),
-      });
+      if (audioUri) {
+        const audio = new Audio.Audio();
+        await audio.loadAsync({ uri: audioUri });
+        await audio.playAsync();
+      }
     } catch (error) {
-      console.error('Failed to speak:', error);
+      console.error('Failed to play recording:', error);
     }
   };
 
@@ -119,25 +94,30 @@ const Assistant = () => {
         {isListening ? 'Ouvindo...' : 'Toque para falar'}
       </Text>
 
-      <Animated.View style={{ transform: [{ scale: animationValue }] }}>
+      <AudioVisualizer amplitude={amplitude} />
+
+      <TouchableOpacity 
+        style={[styles.button, isListening && styles.buttonListening]}
+        onPress={isListening ? stopRecording : startRecording}
+      >
+        <MaterialCommunityIcons 
+          name={isListening ? "microphone" : "microphone-outline"} 
+          size={30} 
+          color="#fff" 
+        />
+      </TouchableOpacity>
+
+      {audioUri && (
         <TouchableOpacity 
-          style={[styles.button, isListening && styles.buttonListening]}
-          onPress={isListening ? stopListening : startListening}
-          disabled={isListening}
+          style={styles.playButton}
+          onPress={playRecording}
         >
           <MaterialCommunityIcons 
-            name={isListening ? "microphone" : "microphone-outline"} 
+            name="play-circle" 
             size={30} 
-            color="#fff" 
+            color="#00ff00" 
           />
         </TouchableOpacity>
-      </Animated.View>
-
-      {spokenText && (
-        <Text style={styles.text}>Você: {spokenText}</Text>
-      )}
-      {assistantResponse && (
-        <Text style={styles.responseText}>Assistente: {assistantResponse}</Text>
       )}
     </View>
   );
@@ -169,15 +149,8 @@ const styles = StyleSheet.create({
   buttonListening: {
     backgroundColor: '#002200',
   },
-  text: {
-    color: '#fff',
-    fontSize: 16,
-    marginBottom: 10,
-  },
-  responseText: {
-    color: '#00ff00',
-    fontSize: 16,
-    marginTop: 10,
+  playButton: {
+    marginTop: 20,
   },
 });
 
